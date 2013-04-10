@@ -838,7 +838,7 @@ int main(int argc, char **argv)
     }
 
     if (opt_cmd == OPT_LOG_SHOW || opt_cmd == OPT_LOG_LIST) {
-      ret = RGWZoneAdminOp::show_log(store, zone_op, f);
+      ret = RGWZoneAdminOp::show_logs(store, zone_op, f);
       if (ret < 0) {
 	cerr << "error reading log " << zone_op.get_log_object() << ": " << cpp_strerror(-ret) << std::endl;
 	return -ret;
@@ -876,7 +876,7 @@ int main(int argc, char **argv)
   }
 
   if (opt_cmd == OPT_POOLS_LIST) {
-    ret = RGWZoneAdminOp::list_pools(store, zone_op, f);
+    ret = RGWZoneAdminOp::list_pools(store, f);
     if (ret < 0) {
       cerr << "could not list placement set: " << cpp_strerror(-ret) << std::endl;
       return ret;
@@ -986,7 +986,7 @@ int main(int argc, char **argv)
   }
 
   if (opt_cmd == OPT_GC_LIST) {
-      ret = RGWZoneAdminOp::list_garbage(store, zone_op, f);
+      ret = RGWZoneAdminOp::list_garbage(store, f);
       if (ret < 0) {
 	cerr << "ERROR: failed to list objs: " << cpp_strerror(-ret) << std::endl;
 	return 1;
@@ -994,7 +994,7 @@ int main(int argc, char **argv)
   }
 
   if (opt_cmd == OPT_GC_PROCESS) {
-    ret =  RGWZoneAdminOp::process_garbage(store, zone_op);
+    ret =  RGWZoneAdminOp::process_garbage(store);
     if (ret < 0) {
       cerr << "ERROR: gc processing returned error: " << cpp_strerror(-ret) << std::endl;
       return 1;
@@ -1002,7 +1002,7 @@ int main(int argc, char **argv)
   }
 
   if (opt_cmd == OPT_ZONE_INFO) {
-    ret = RGWZoneAdminOp::zone_info(store, zone_op, f); 
+    ret = RGWZoneAdminOp::zone_info(store, f);
   }
 
   if (opt_cmd == OPT_ZONE_SET) {
