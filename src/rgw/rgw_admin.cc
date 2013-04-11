@@ -11,6 +11,7 @@ using namespace std;
 #include "common/config.h"
 #include "common/ceph_argparse.h"
 #include "common/Formatter.h"
+#include "common/ceph_json.h"
 #include "global/global_init.h"
 #include "common/errno.h"
 #include "include/utime.h"
@@ -19,7 +20,6 @@ using namespace std;
 #include "common/armor.h"
 #include "rgw_user.h"
 #include "rgw_bucket.h"
-#include "rgw_zone.h"
 #include "rgw_rados.h"
 #include "rgw_acl.h"
 #include "rgw_acl_s3.h"
@@ -385,6 +385,64 @@ static int init_bucket(string& bucket_name, rgw_bucket& bucket)
   return 0;
 }
 
+static int read_input(const string& infile, bufferlist& bl)
+{
+  int fd = 0;
+  if (infile.size()) {
+    fd = open(infile.c_str(), O_RDONLY);
+    if (fd < 0) {
+      int err = -errno;
+      cerr << "error reading input file " << infile << std::endl;
+      return err;
+    }
+  }
+
+#define READ_CHUNK 8196
+  int r;
+
+  do {
+    char buf[READ_CHUNK];
+
+    r = read(fd, buf, READ_CHUNK);
+    if (r < 0) {
+      int err = -errno;
+      cerr << "error while reading input" << std::endl;
+      return err;
+    }
+    bl.append(buf, r);
+  } while (r > 0);
+
+  if (infile.size()) {
+    close(fd);
+  }
+
+  return 0;
+}
+
+template <class T>
+static int read_decode_json(const string& infile, T& t)
+{
+  bufferlist bl;
+  int ret = read_input(infile, bl);
+  if (ret < 0) {
+    cerr << "ERROR: failed to read input: " << cpp_strerror(-ret) << std::endl;
+    return ret;
+  }
+  JSONParser p;
+  ret = p.parse(bl.c_str(), bl.length());
+  if (ret < 0) {
+    cout << "failed to parse JSON" << std::endl;
+    return ret;
+  }
+
+  try {
+    t.decode_json(&p);
+  } catch (JSONDecoder::err& e) {
+    cout << "failed to decode JSON input: " << e.message << std::endl;
+    return -EINVAL;
+  }
+  return 0;
+}
 int main(int argc, char **argv) 
 {
   vector<const char*> args;
@@ -427,7 +485,6 @@ int main(int argc, char **argv)
   std::string infile;
   RGWUserAdminOpState user_op;
   RGWBucketAdminOpState bucket_op;
-  RGWZoneAdminOpState zone_op;
 
   std::string val;
   std::ostringstream errs;
@@ -646,34 +703,6 @@ int main(int argc, char **argv)
   bucket_op.set_check_objects(check_objects);
   bucket_op.set_delete_children(delete_child_objects);
 
-  /* populate zone operation */
-  if (show_log_entries)
-    zone_op.set_show_log_entries();
-
-  if (show_log_sum)
-    zone_op.set_show_log_sum();
-
-  if (skip_zero_entries)
-    zone_op.set_skip_zero_entries();
-
-  if (!bucket_name.empty())
-    zone_op.set_bucket_name(bucket_name);
-
-  if (!bucket_id.empty())
-    zone_op.set_bucket_id(bucket_id);
-
-  if (!infile.empty())
-    zone_op.set_infile(infile);
-
-  if (!pool_name.empty())
-    zone_op.add_pool_name(pool_name);
-
-  if (!date.empty())
-    zone_op.set_date(date);
-
-  if (!object.empty())
-    zone_op.set_object(object);
-
   // required to gather errors from operations
   std::string err_msg;
 
@@ -828,27 +857,135 @@ int main(int argc, char **argv)
     }
   }
 
-  if (opt_cmd == OPT_LOG_SHOW || opt_cmd == OPT_LOG_RM || OPT_LOG_LIST) {
-    if (opt_cmd == OPT_LOG_SHOW || opt_cmd == OPT_LOG_RM) { 
-      std::string log_object = zone_op.get_log_object(); 
-      if (log_object.empty()) {
-        cerr << "specify an object or a date, bucket and bucket-id" << std::endl;
-        return usage();
-      }
+  if (opt_cmd == OPT_LOG_LIST) {
+    // filter by date?
+    if (date.size() && date.size() != 10) {
+      cerr << "bad date format for '" << date << "', expect YYYY-MM-DD" << std::endl;
+      return -EINVAL;
     }
 
-    if (opt_cmd == OPT_LOG_SHOW || opt_cmd == OPT_LOG_LIST) {
-      ret = RGWZoneAdminOp::show_logs(store, zone_op, f);
-      if (ret < 0) {
-	cerr << "error reading log " << zone_op.get_log_object() << ": " << cpp_strerror(-ret) << std::endl;
-	return -ret;
+    formatter->reset();
+    formatter->open_array_section("logs");
+    RGWAccessHandle h;
+    int r = store->log_list_init(date, &h);
+    if (r == -ENOENT) {
+      // no logs.
+    } else {
+      if (r < 0) {
+	cerr << "log list: error " << r << std::endl;
+	return r;
       }
-      cout << std::endl; //hopefully this fixes lack of trailing newline
-    } else if (opt_cmd == OPT_LOG_RM) {
-      ret = RGWZoneAdminOp::remove_log(store, zone_op);
-      if (ret < 0) {
-	cerr << "error removing log " << zone_op.get_log_object() << ": " << cpp_strerror(-ret) << std::endl;
-	return -ret;
+      while (true) {
+	string name;
+	int r = store->log_list_next(h, &name);
+	if (r == -ENOENT)
+	  break;
+	if (r < 0) {
+	  cerr << "log list: error " << r << std::endl;
+	  return r;
+	}
+	formatter->dump_string("object", name);
+      }
+    }
+    formatter->close_section();
+    formatter->flush(cout);
+    cout << std::endl;
+  }
+
+  if (opt_cmd == OPT_LOG_SHOW || opt_cmd == OPT_LOG_RM) {
+    if (object.empty() && (date.empty() || bucket_name.empty() || bucket_id.empty())) {
+      cerr << "specify an object or a date, bucket and bucket-id" << std::endl;
+      return usage();
+    }
+
+    string oid;
+    if (!object.empty()) {
+      oid = object;
+    } else {
+      oid = date;
+      oid += "-";
+      oid += bucket_id;
+      oid += "-";
+      oid += string(bucket.name);
+    }
+
+    if (opt_cmd == OPT_LOG_SHOW) {
+      RGWAccessHandle h;
+
+      int r = store->log_show_init(oid, &h);
+      if (r < 0) {
+	cerr << "error opening log " << oid << ": " << cpp_strerror(-r) << std::endl;
+	return -r;
+      }
+
+      formatter->reset();
+      formatter->open_object_section("log");
+
+      struct rgw_log_entry entry;
+      
+      // peek at first entry to get bucket metadata
+      r = store->log_show_next(h, &entry);
+      if (r < 0) {
+	cerr << "error reading log " << oid << ": " << cpp_strerror(-r) << std::endl;
+	return -r;
+      }
+      formatter->dump_string("bucket_id", entry.bucket_id);
+      formatter->dump_string("bucket_owner", entry.bucket_owner);
+      formatter->dump_string("bucket", entry.bucket);
+
+      uint64_t agg_time = 0;
+      uint64_t agg_bytes_sent = 0;
+      uint64_t agg_bytes_received = 0;
+      uint64_t total_entries = 0;
+
+      if (show_log_entries)
+        formatter->open_array_section("log_entries");
+
+      do {
+	uint64_t total_time =  entry.total_time.sec() * 1000000LL * entry.total_time.usec();
+
+        agg_time += total_time;
+        agg_bytes_sent += entry.bytes_sent;
+        agg_bytes_received += entry.bytes_received;
+        total_entries++;
+
+        if (skip_zero_entries && entry.bytes_sent == 0 &&
+            entry.bytes_received == 0)
+          goto next;
+
+        if (show_log_entries) {
+
+	  rgw_format_ops_log_entry(entry, formatter);
+	  formatter->flush(cout);
+        }
+next:
+	r = store->log_show_next(h, &entry);
+      } while (r > 0);
+
+      if (r < 0) {
+      	cerr << "error reading log " << oid << ": " << cpp_strerror(-r) << std::endl;
+	return -r;
+      }
+      if (show_log_entries)
+        formatter->close_section();
+
+      if (show_log_sum) {
+        formatter->open_object_section("log_sum");
+	formatter->dump_int("bytes_sent", agg_bytes_sent);
+	formatter->dump_int("bytes_received", agg_bytes_received);
+	formatter->dump_int("total_time", agg_time);
+	formatter->dump_int("total_entries", total_entries);
+        formatter->close_section();
+      }
+      formatter->close_section();
+      formatter->flush(cout);
+      cout << std::endl;
+    }
+    if (opt_cmd == OPT_LOG_RM) {
+      int r = store->log_remove(oid);
+      if (r < 0) {
+	cerr << "error removing log " << oid << ": " << cpp_strerror(-r) << std::endl;
+	return -r;
       }
     }
   }
@@ -859,7 +996,7 @@ int main(int argc, char **argv)
       return usage();
     }
 
-    ret = RGWZoneAdminOp::add_pools(store, zone_op, f); 
+    int ret = store->add_bucket_placement(pool_name);
     if (ret < 0)
       cerr << "failed to add bucket placement: " << cpp_strerror(-ret) << std::endl;
   }
@@ -870,17 +1007,29 @@ int main(int argc, char **argv)
       return usage();
     }
 
-    ret = RGWZoneAdminOp::remove_pools(store, zone_op, f);
+    int ret = store->remove_bucket_placement(pool_name);
     if (ret < 0)
       cerr << "failed to remove bucket placement: " << cpp_strerror(-ret) << std::endl;
   }
 
   if (opt_cmd == OPT_POOLS_LIST) {
-    ret = RGWZoneAdminOp::list_pools(store, f);
+    set<string> pools;
+    int ret = store->list_placement_set(pools);
     if (ret < 0) {
       cerr << "could not list placement set: " << cpp_strerror(-ret) << std::endl;
       return ret;
     }
+    formatter->reset();
+    formatter->open_array_section("pools");
+    set<string>::iterator siter;
+    for (siter = pools.begin(); siter != pools.end(); ++siter) {
+      formatter->open_object_section("pool");
+      formatter->dump_string("name",  *siter);
+      formatter->close_section();
+    }
+    formatter->close_section();
+    formatter->flush(cout);
+    cout << std::endl;
   }
 
   if (opt_cmd == OPT_USAGE_SHOW) {
@@ -986,15 +1135,47 @@ int main(int argc, char **argv)
   }
 
   if (opt_cmd == OPT_GC_LIST) {
-      ret = RGWZoneAdminOp::list_garbage(store, f);
+    int ret;
+    int index = 0;
+    string marker;
+    bool truncated;
+    formatter->open_array_section("entries");
+
+    do {
+      list<cls_rgw_gc_obj_info> result;
+      ret = store->list_gc_objs(&index, marker, 1000, result, &truncated);
       if (ret < 0) {
 	cerr << "ERROR: failed to list objs: " << cpp_strerror(-ret) << std::endl;
 	return 1;
       }
+
+
+      list<cls_rgw_gc_obj_info>::iterator iter;
+      for (iter = result.begin(); iter != result.end(); ++iter) {
+	cls_rgw_gc_obj_info& info = *iter;
+	formatter->open_object_section("chain_info");
+	formatter->dump_string("tag", info.tag);
+	formatter->dump_stream("time") << info.time;
+	formatter->open_array_section("objs");
+        list<cls_rgw_obj>::iterator liter;
+	cls_rgw_obj_chain& chain = info.chain;
+	for (liter = chain.objs.begin(); liter != chain.objs.end(); ++liter) {
+	  cls_rgw_obj& obj = *liter;
+	  formatter->dump_string("pool", obj.pool);
+	  formatter->dump_string("oid", obj.oid);
+	  formatter->dump_string("key", obj.key);
+	}
+	formatter->close_section(); // objs
+	formatter->close_section(); // obj_chain
+	formatter->flush(cout);
+      }
+    } while (truncated);
+    formatter->close_section();
+    formatter->flush(cout);
   }
 
   if (opt_cmd == OPT_GC_PROCESS) {
-    ret =  RGWZoneAdminOp::process_garbage(store);
+    int ret = store->process_gc();
     if (ret < 0) {
       cerr << "ERROR: gc processing returned error: " << cpp_strerror(-ret) << std::endl;
       return 1;
@@ -1002,15 +1183,26 @@ int main(int argc, char **argv)
   }
 
   if (opt_cmd == OPT_ZONE_INFO) {
-    ret = RGWZoneAdminOp::zone_info(store, f);
+    store->zone.dump(formatter);
+    formatter->flush(cout);
   }
 
   if (opt_cmd == OPT_ZONE_SET) {
-    ret = RGWZoneAdminOp::zone_set(store, zone_op, f);
+    RGWZoneParams zone;
+    zone.init_default();
+    int ret = read_decode_json(infile, zone);
+    if (ret < 0) {
+      return 1;
+    }
+
+    ret = zone.store_info(g_ceph_context, store);
     if (ret < 0) {
       cerr << "ERROR: couldn't store zone info: " << cpp_strerror(-ret) << std::endl;
       return 1;
     }
+
+    zone.dump(formatter);
+    formatter->flush(cout);
   }
 
   if (opt_cmd == OPT_USER_CHECK) {
