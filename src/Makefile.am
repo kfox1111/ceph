@@ -33,6 +33,7 @@ ceph_sbin_SCRIPTS = \
 	ceph-disk \
 	ceph-disk-prepare \
 	ceph-disk-activate \
+	ceph-disk-udev \
 	ceph-create-keys
 
 sbin_SCRIPTS = \
