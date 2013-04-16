@@ -309,20 +309,20 @@ int RGWZoneAdminOp::show_logs(RGWRados *store, RGWZoneAdminOpState& op_state,
     }
   } else {
     std::string log_object = op_state.get_log_object();
+    if (log_object.empty())
+      return -EINVAL;
+
     int r = store->log_show_init(log_object, &h);
     if (r < 0)
-      return -r;
-
-    struct rgw_log_entry entry;
-
-    // peek at first entry to get bucket metadata
-    r = store->log_show_next(h, &entry);
-    if (r < 0)
-      return -r;
-
-    entries.push_back(entry);
+      return r;
 
     do {
+      struct rgw_log_entry entry;
+
+      r = store->log_show_next(h, &entry);
+      if (r < 0)
+        return r;
+
       uint64_t total_time =  entry.total_time.sec() * 1000000LL * entry.total_time.usec();
 
       agg_time += total_time;
@@ -330,14 +330,8 @@ int RGWZoneAdminOp::show_logs(RGWRados *store, RGWZoneAdminOpState& op_state,
       agg_bytes_received += entry.bytes_received;
       total_entries++;
 
-      r = store->log_show_next(h, &entry);
-
-      // entry will have been updated by log_show_next
       entries.push_back(entry);
     } while (r > 0);
-
-    if (r < 0)
-      return r;
   }
 
   // either list the log objects or dump a log entry
@@ -358,7 +352,6 @@ int RGWZoneAdminOp::show_logs(RGWRados *store, RGWZoneAdminOpState& op_state,
     std::list<rgw_log_entry>::iterator entries_iter = entries.begin();
     formatter->open_object_section("log");
 
-    // peek at first entry to get bucket metadata
     formatter->dump_string("bucket_id", entries_iter->bucket_id);
     formatter->dump_string("bucket_owner", entries_iter->bucket_owner);
     formatter->dump_string("bucket", entries_iter->bucket);
@@ -366,21 +359,20 @@ int RGWZoneAdminOp::show_logs(RGWRados *store, RGWZoneAdminOpState& op_state,
     if (show_log_entries) {
       formatter->open_array_section("log_entries");
 
-     while (entries_iter != entries.end()) {
-       entries_iter++;
-       if (entries_iter == entries.end())
-         break;
+      while (entries_iter != entries.end()) {
+        entries_iter++;
+        if (entries_iter == entries.end())
+          break;
 
-      rgw_log_entry entry = *entries_iter;
+        rgw_log_entry entry = *entries_iter;
 
-       if (skip_zero_entries && entry.bytes_sent == 0 &&
-               entry.bytes_received == 0) {
+        if (skip_zero_entries && entry.bytes_sent == 0 &&
+                entry.bytes_received == 0) {
           continue;
-       }
+        }
 
         rgw_format_ops_log_entry(entry, formatter);
         flusher.flush();
-
       }
 
       formatter->close_section();
