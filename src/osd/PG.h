@@ -2007,10 +2007,26 @@ class PGRef {
   PG *pg;
   uint64_t id;
 public:
-  PGRef() : pg(NULL) {}
-  PGRef (PG *p) : pg(p), id(pg->get_with_id()) {}
+  PGRef() : pg(NULL), id(-1) {}
+  PGRef(PG *p) : pg(p), id(pg->get_with_id()) {}
   ~PGRef() {
     pg->put_with_id(id);
+  }
+  void swap(PGRef &other) {
+    PG *opg = other.pg;
+    uint64_t oid = other.id;
+    other.pg = pg;
+    other.id = id;
+    pg = opg;
+    id = oid;
+  }
+  PGRef(const PGRef& rhs) {
+    PGRef o(rhs.pg);
+    swap(o);
+  }
+  void operator=(const PGRef &rhs) {
+    PGRef o(rhs.pg);
+    swap(o);
   }
   PG &operator*() {
     return *pg;
