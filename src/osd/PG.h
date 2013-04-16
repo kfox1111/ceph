@@ -413,6 +413,9 @@ protected:
   Mutex _lock;
   Cond _cond;
   atomic_t ref;
+  Mutex _ref_id_lock;
+  uint64_t _ref_id;
+  map<uint64_t, string> _live_ids;
 
 public:
   bool deleting;  // true while in removing or OSD is shutting down
@@ -448,6 +451,9 @@ public:
     _cond.Signal();
   }
 
+  uint64_t get_with_id();
+  void put_with_id(uint64_t);
+  void dump_live_ids();
   void get() {
     //generic_dout(0) << this << " " << info.pgid << " get " << ref.test() << dendl;
     //assert(_lock.is_locked());
@@ -1996,6 +2002,28 @@ ostream& operator<<(ostream& out, const PG& pg);
 void intrusive_ptr_add_ref(PG *pg);
 void intrusive_ptr_release(PG *pg);
 
-typedef boost::intrusive_ptr<PG> PGRef;
+//typedef boost::intrusive_ptr<PG> PGRef;
+class PGRef {
+  PG *pg;
+  uint64_t id;
+public:
+  PGRef() : pg(NULL) {}
+  PGRef (PG *p) : pg(p), id(pg->get_with_id()) {}
+  ~PGRef() {
+    pg->put_with_id(id);
+  }
+  PG &operator*() {
+    return *pg;
+  }
+  PG *operator->() {
+    return pg;
+  }
+  bool operator<(const PGRef &lhs) const {
+    return pg < lhs.pg;
+  }
+  bool operator==(const PGRef &lhs) const {
+    return pg == lhs.pg;
+  }
+};
 
 #endif
